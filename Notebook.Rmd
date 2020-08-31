@@ -1,0 +1,489 @@
+---
+title: "Bayesian Hierarchical Modeling with RStan"
+output: html_notebook
+author: "[Dorsa M. Arezooji](https://Dorsa-Arezooji.github.io)"
+---
+
+***
+
+## 1. loading the dataset & create the dataframe
+```{r}
+setwd("~/Desktop/MSc Project/rstan/pigs")
+library(rstan)
+library(gsubfn)
+library(pracma)
+library(scales)
+```
+
+```{r}
+pigs <- read.csv("~/Desktop/MSc Project/rstan/pigs/pigs.csv")
+df = data.frame(pigs)
+summary(df)
+print(df)
+```
+## 2. Creating the Data List
+
+`E` : number of experiments  
+`x` : dosage vector  
+`N` : total number of pigs  
+`n` : number of cured pigs
+```{r}
+d = list(
+  E = nrow(df),
+  x = df[[3]],
+  N = df[[2]],
+  n = df[[1]]
+)
+sprintf('the data list has %s enteries' , d[1])
+```
+## 3. Creating the Stan Models
+in order to avoid having to write the stan codes for all 21 models, run the cell bellow and replace `dist_a` and `dist_b` with the proper distributions for alpha and beta
+```{r}
+m = '
+data {
+  int<lower=1> E;
+  vector[E] x;
+  int<lower=1> N[E];
+  int<lower=0> n [E];
+}
+  
+parameters {
+  real alpha;
+  real beta;
+}
+
+model {
+  alpha ~ dist_a;
+  beta ~ dist_b;
+  n ~ binomial_logit(N, alpha + beta * x);
+}
+'
+
+m0 = '
+data {
+  int<lower=1> E;
+  vector[E] x;
+  int<lower=1> N[E];
+  int<lower=0> n [E];
+}
+  
+parameters {
+  real alpha;
+  real beta;
+}
+
+model {
+  n ~ binomial_logit(N, alpha + beta * x);
+}
+'
+```
+## 4. Automating the Results with Functions
+create a `results` dataframe to store the results and automatically populate it by invoking the `get_results` function
+```{r}
+# initialize the results dataframe
+results = data.frame('Model' = 1:21, 
+                     'PriorType' = c(rep('beta', 4), rep('logistic', 3), rep('normal', 5), rep('uniform', 8), rep('weibull', 1)), 
+                     'RunTime' = rep(0,21), 
+                     'alpha_mean' = rep(0,21), 
+                     'alpha_sd' = rep(0,21), 
+                     'beta_mean' = rep(0,21), 
+                     'beta_sd' = rep(0,21), 
+                     'n_eff_alpha' = rep(0,21), 
+                     'Rhat_alpha' = rep(0,21), 
+                     'n_eff_beta' = rep(0,21), 
+                     'Rhat_beta' = rep(0,21),
+                     'lp' = rep(0,21))
+
+
+# a function to insert the results from each model into the results df
+
+get_results = function(i, fit_i){
+  r = summary(fit_i, pars = c('alpha', 'beta', 'lp__'))$summary
+  results['RunTime'][[1]][i] = sum(get_elapsed_time(fit_i))
+  results['alpha_mean'][[1]][i] = r['alpha', 'mean']
+  results['beta_mean'][[1]][i] = r['beta', 'mean']
+  results['alpha_sd'][[1]][i] = r['alpha', 'sd']
+  results['beta_sd'][[1]][i] = r['beta', 'sd']
+  results['lp'][[1]][i] = r['lp__', 'mean']
+  results['n_eff_alpha'][[1]][i] = r['alpha', 'n_eff']
+  results['Rhat_alpha'][[1]][i] = r['alpha', 'Rhat']
+  results['n_eff_beta'][[1]][i] = r['beta', 'n_eff']
+  results['Rhat_beta'][[1]][i] = r['beta', 'Rhat']
+  return(results)
+}
+
+# a function to plot the posterior densities of a model
+
+prior_posterior_vis = function(fit, type, p1, p2, a="alpha", b="beta", m='default', l='default'){
+  if(toString(m) == 'default'){
+    m = paste('a, b', '~', type, '(', p1, ',', p2, ')')
+  }
+  if(toString(l) == 'default'){
+    l = c(expression(alpha['prior'], beta['prior'], alpha['posterior'], beta['posterior']))
+  }
+  a_den = density(fit@sim[["samples"]][[1]][[a]])
+  b_den = density(fit@sim[["samples"]][[1]][[b]])
+  x0 = -25
+  x1 = 30
+  x_range = c(-20, 25)
+  y_range = c(0, 0.8)
+  plot(a_den, xlim=x_range, ylim=y_range, col="purple", lwd = 3, xlab='', ylab='Probability Density', main=m, cex.main=1, font.main = 1)
+  xlabel <- seq(-20, 25, by = 5)
+  axis(1, at = xlabel, las = 1)
+  par(new=TRUE)
+  plot(b_den, xlim=x_range, ylim=y_range, col="violet", lwd = 3, xlab='', ylab='Probability Density', main='')
+  par(new=TRUE)
+  abline(xlim=x_range, ylim=y_range, v=-14.03, col=alpha("purple", 0.5), lwd=2)
+  par(new=TRUE)
+  abline(xlim=x_range, ylim=y_range, v=9.39, col=alpha("violet", 0.5), lwd=2)
+  if (type == 'logistic'){
+    curve((0.25/p2)*(sech(0.5*(x-p1)/p2)^2), x0, x1, ylim=y_range, add=TRUE, col=alpha("pink", 0.6), lwd = 3)
+  }
+  if (type == 'normal'){
+    curve(exp(-0.5*((x-p1)/p2)^2)/(p2*sqrt(2*pi)), x0, x1, ylim=y_range, add=TRUE, col=alpha("pink", 0.6), lwd = 3)
+  }
+    if (type == 'uniform'){
+    curve((x^0)/(p2-p1), x0, x1, ylim=y_range, add=TRUE, col=alpha("pink", 0.6), lwd = 3)
+  }
+  legend("bottomright", legend = l, col = c("pink", "pink", "purple", "violet"), pch = c("____ "), bty = "n", pt.cex = 3, cex = 1, text.col = "black", horiz = F , inset = c(0.01, 0.1))
+}
+
+# a function to implement different prior distributions
+
+priorize = function(prior_a, prior_b){
+  model_code = gsub('dist_a', prior_a, gsub('dist_b', prior_b, m))
+  return(model_code)
+}
+```
+## 5. Running the Stan Files
+```{r}
+m0 = '
+data {
+  int<lower=1> E; // number of experiments
+  vector[E] x; // dosage vector
+  int<lower=1> N[E]; // total number of pigs
+  int<lower=0> n[E]; // number of cured pigs
+}
+  
+parameters {
+  real alpha;
+  real beta;
+}
+
+model {
+  n ~ binomial_logit(N, alpha + beta * x);
+}
+'
+```
+### 5.1. Beta Priors
+Cab't be used since the beta distribution in=s defined in range [0,1]
+**running the cells below will cause the simulation to hang**
+```{r}
+m1 = priorize('beta(0.5, 0.5)', 'beta(-100, 100)')
+s1= stan(model_code = m1, data = d, chains = 4, iter = 3750, algorithm = 'HMC', refresh=0)
+results = get_results(1, s1)
+```
+
+```{r}
+m2 = priorize('beta(0.5, 0.5)', 'beta(-20, 20)')
+s2 = stan(model_code = m2, data = d, chains = 4, iter = 3800, algorithm = 'HMC', refresh=0)
+results = get_results(2, s2)
+```
+
+```{r}
+m3 = priorize('beta(1, 1)', 'beta(-20, 20)')
+s3 = stan(model_code = m3, data = d, chains = 4, iter = 3800, algorithm = 'HMC', refresh=0)
+results = get_results(3, s3)
+```
+
+```{r}
+m4 = priorize('beta(100, 100)', 'beta(-20, 20)')
+s4 = stan(model_code = m4, data = d, chains = 4, iter = 3800, algorithm = 'HMC', refresh=0)
+results = get_results(4, s4)
+```
+### 5.2. Logistic Priors
+```{r}
+m5 = priorize('logistic(0, 1)', 'logistic(0, 1)')
+s5 = stan(model_code = m5, data = d, chains = 4, iter = 3800, algorithm = 'HMC', refresh=0)
+results = get_results(5, s5)
+```
+
+```{r}
+m6 = priorize('logistic(0, 10)', 'logistic(0, 10)')
+s6 = stan(model_code = m6, data = d, chains = 4, iter = 3800, algorithm = 'HMC', refresh=0)
+results = get_results(6, s6)
+```
+
+```{r}
+m7 = priorize('logistic(10, 10)', 'logistic(10, 10)')
+s7 = stan(model_code = m7, data = d, chains = 4, iter = 3800, algorithm = 'HMC', refresh=0)
+results = get_results(7, s7)
+```
+### 5.3. Normal Priors
+```{r}
+m8 = priorize('normal(0, 20)', 'normal(0, 30)')
+s8 = stan(model_code = m8, data = d, chains = 4, iter = 4000, algorithm = 'HMC', refresh=0)
+results = get_results(8, s8)
+```
+
+```{r}
+m9 = priorize('normal(0, 1)', 'normal(0, 1)')
+s9 = stan(model_code = m9, data = d, chains = 4, iter = 4200, algorithm ='HMC', refresh=0)
+results = get_results(9, s9)
+```
+
+```{r}
+m10 = priorize('normal(0, 100)', 'normal(0, 100)')
+s10 = stan(model_code = m10, data = d, chains = 4, iter = 4000, algorithm ='HMC', refresh=0)
+results = get_results(10, s10)
+```
+
+```{r}
+m11 = priorize('normal(0, 10000)', 'normal(0, 10000)')
+s11 = stan(model_code = m11, data = d, chains = 4, iter = 4200, algorithm = 'HMC', refresh=0)
+results = get_results(11, s11)
+```
+
+```{r}
+m12 = priorize('normal(-100, 100)', 'normal(-100, 100)')
+s12 = stan(model_code = m12, data = d, chains = 4, iter = 3850, algorithm ='HMC', refresh=0)
+results = get_results(12, s12)
+```
+### 5.4. Uniform Priors
+```{r}
+m13 = priorize('uniform(-100, 100)', 'uniform(-100, 100)')
+s13 = stan(model_code = m13, data = d, chains = 4, iter = 3850, algorithm = 'HMC', refresh=0)
+results = get_results(13, s13)
+```
+
+```{r}
+m14 = priorize('uniform(-1000, 1000)', 'uniform(-1000, 1000)')
+s14 = stan(model_code = m14, data = d, chains = 4, iter = 4000, algorithm = 'HMC', refresh=0)
+results = get_results(14, s14)
+```
+since uniform priors assign a (non-zero) uniform probability in a defined range, and a zero probability outside od=f that range, they should be used with caution:
+* if the target value is in the zero-probability are, the simulation hangs. This happens in models m15 to m19 as they assign zero probabilities to negative values including the target $$\alpha$$ which has most of its density in the negative region.
+```{r}
+m15 = priorize('uniform(0, 10)', 'uniform(0, 10)')
+s15_agg= stan(model_code = m15, data = d_agg, chains = 4, iter = 3750, algorithm = 'HMC', refresh=0)
+results =get_results(15, s15_agg)
+```
+
+```{r}
+m16 = priorize('uniform(0, 20)', 'uniform(0, 20)')
+s16 = stan(model_code = m16, data = d, chains = 4, iter = 3750, algorithm = 'HMC', refresh=0)
+results = get_results(16, s16)
+```
+
+```{r}
+m17 = priorize('uniform(0, 50)', 'uniform(0, 50)')
+s17_agg= stan(model_code = m17, data = d_agg, chains = 4, iter = 3750, algorithm = 'HMC', refresh=0)
+results =get_results(17, s17_agg)
+```
+
+```{r}
+m18 = priorize('uniform(0, 100)', 'uniform(0, 100)')
+s18 = stan(model_code = m18, data = d, chains = 4, iter = 3750, algorithm = 'HMC', refresh=0)
+results = get_results(18, s18)
+```
+
+```{r}
+m19 = priorize('uniform(0, inf)', 'uniform(0, inf)')
+s19 = stan(model_code = m19, data = d, chains = 4, iter = 3800, algorithm = 'HMC', refresh=0)
+results = get_results(19, s19)
+```
+by default, when no prior distribution is defined, stan assumes a uniform distribution: uniform(-inf, inf)
+```{r}
+s20 = stan(model_code = m0, data = d, chains = 4, iter = 3800, algorithm = 'HMC', refresh=0)
+results = get_results(20, s20)
+```
+the weibull prior 
+```{r}
+m21 = priorize('weibull(1,1)', 'weibull(1,1)')
+s21 = stan(model_code = m21, data = d, chains = 4, iter = 3800, algorithm = 'HMC', refresh=0)
+results = get_results(20, s20)
+```
+## 6. Sampling Results
+```{r}
+samples = s5 # substitute with any other samples
+
+# sampling results
+print(samples)
+plot(samples)
+
+# chain diagnostics
+traceplot(samples)
+
+#density histograms
+stan_hist(samples, binwidth = 0.1)
+```
+## 7. Hierarchical Modeling
+```{r}
+# Hierarchical Model without NCP
+mH = '
+data {
+  int<lower=1> E;
+  vector[E] x;
+  int<lower=1> N[E];
+  int<lower=0> n[E];
+}
+
+parameters {
+  vector[E] alpha;
+  vector[E] beta;
+  real mu_a;
+  real mu_b;
+  real<lower=0> sigma_a;
+  real<lower=0> sigma_b;
+}
+
+model {
+  mu_a ~ normal(0,20);
+  mu_b ~ normal(0,20);
+  sigma_a ~ normal(0,5);
+  sigma_b ~ normal(0,5);
+  alpha ~ normal(mu_a, sigma_a);
+  beta ~ normal(mu_b, sigma_b);
+  n ~ binomial_logit(N, alpha + beta .* x);
+}
+'
+# Hierarchical Model with NCP
+
+m_H = '
+data {
+  int<lower=1> E;
+  vector[E] x;
+  int<lower=1> N[E];
+  int<lower=0> n[E];
+}
+  
+parameters {
+  vector[E] a_raw;
+  vector[E] b_raw;
+  real mu_a;
+  real mu_b;
+  real<lower=0> sigma_a;
+  real<lower=0> sigma_b;
+}
+
+transformed parameters {
+  vector[E] alpha = mu_a + sigma_a * a_raw;
+  vector[E] beta = mu_b + sigma_b * b_raw;
+}
+
+model {
+  mu_a ~ normal(0,20);
+  mu_b ~ normal(0,20);
+  sigma_a ~ normal(0,2);
+  sigma_b ~ normal(0,2);
+  a_raw ~ std_normal();
+  b_raw ~ std_normal();
+  n ~ binomial_logit(N, alpha + beta .* x);
+}
+'
+```
+
+```{r}
+s_hh = stan(model_code = m_H, data = d, chains = 4, iter = 50000, algorithm = 'HMC')
+```
+## 8. Hierarchical Resuls
+```{r}
+plot(s_hh, pars = c('mu_a', 'mu_b', 'sigma_a', 'sigma_b'))
+print(s_hh, pars = c('mu_a', 'mu_b', 'sigma_a', 'sigma_b'))
+print(sum(get_elapsed_time(s_hh)))
+stan_hist(s_hh, pars=c('mu_a', 'mu_b', 'sigma_a', 'sigma_b'), bins=50)
+```
+## 9. Comparison of Models
+```{r}
+p = read.csv("~/Desktop/MSc Project/survival.csv")
+df1 = data.frame(p)
+
+# Experimental Data points
+plot(p, pch=16, cex=1.5, col=alpha("#69b3a2",0.6), xlab="Dosage", ylab=expression('P'['survival']), cex.lab=1.3, cex.axis=1.2)
+
+# Hill Model
+curve(0.9782/(1+(1.51/x)^13.6140), 0.730, 1.890, add=TRUE, col="orange", lwd = 3)
+
+# Hierarchical Model without NCP
+curve(exp(-14.09+9.40*x)/(1+exp(-14.09+9.40*x)), 0.730, 1.890, add=TRUE, col="purple", lwd = 3)
+
+# Hierarchical Model with NCP
+curve(exp(-14.03+9.39*x)/(1+exp(-14.03+9.39*x)), 0.730, 1.890, add=TRUE, col="red", lwd = 3)
+legend("topleft", legend = c('Exprerimental Data'), col = c('#69b3a2'), pch =16, bty = "n", pt.cex = 2, cex = 1,  text.col = "black", horiz = F , inset = c(0.03, 0.1))
+legend("topleft", legend = c(' Hill', ' Hierarchical LR'), col = c('orange', 'red'), pch =c('-'), bty = "n", pt.cex = 5, cex = 1,  text.col = "black", horiz = F , inset = c(0.025, 0.18))
+```
+## 10. Prior and Posterior Densities in Non-Hierarchical Models
+```{r}
+prior_posterior_vis(s5, 'logistic', 0, 1, m = expression(paste(alpha, ' , ', beta, ' ~ logistic (0 , 1)')))
+prior_posterior_vis(s7, 'logistic', 10, 10, m = expression(paste(alpha, ' , ', beta, ' ~ logistic (10 , 10)')))
+prior_posterior_vis(s8, 'normal', 0, 20, m = expression(paste(alpha, ' , ', beta, ' ~ normal (0 , 20)')))
+prior_posterior_vis(s13, 'uniform', -100, 100, m = expression(paste(alpha, ' , ', beta, ' ~ uniform (-100 , 100)')))
+
+prior_posterior_vis(s_hh, 'normal', 0, 20, a="mu_a", b="mu_b", 
+                    m = expression(paste(mu[alpha], ' , ', mu[beta], ' ~ normal (0 , 20)')), 
+                    l = c(expression(mu[alpha][' prior'], mu[beta][' prior'], mu[alpha][' posterior'], mu[beta][' posterior'])))
+```
+## 8. Comparison with AgenaRisk
+```{r}
+# MU 
+
+xa <- seq(-20, 0, length=1000)
+rstan_mua = dnorm(xa, -14.03, 0.76)
+agena_mua = dnorm(xa, -15.555, 0.2548)
+
+xb <- seq(0, 15, length=1000)
+rstan_mub = dnorm(xb, 9.39, 0.54)
+agena_mub = dnorm(xb, 10.48, 0.18485)
+
+par(mfrow=c(2,2))
+plot(xa, agena_mua, type="l", xlim=c(-20, -10), ylim=c(0, 2.5), col="green", lwd = 3, xlab='', main=expression(mu[alpha]), ylab='Probability Density', cex.main=1.5, font.main = 1)
+xlabel <- seq(-30, 30, by = 2)
+axis(1, at = xlabel, las = 1)
+par(new=TRUE)
+plot(xa, rstan_mua, type='l', xlim=c(-20, -10), ylim=c(0, 2.5), col="#42e0f5", lwd = 3, xlab='', ylab='', main='')
+legend("topright", legend = c(' Rstan', ' AgenaRisk'), col = c("#42e0f5", "green"), pch = c("____ "), bty = "n", pt.cex = 3, cex = 0.9, text.col = "black", horiz = F , inset = c(0.01, 0.1))
+par(new=TRUE)
+abline(xlim=c(-20, -10), ylim=c(0, 2.5), v=-14.03, col=alpha("#42e0f5", 0.5), lwd=2)
+par(new=TRUE)
+abline(xlim=c(-20, -10), ylim=c(0, 2.5), v=-15.555, col=alpha("green", 0.5), lwd=2)
+
+plot(xb, agena_mub, type="l", xlim=c(5, 15), ylim=c(0, 2.5), col="green", lwd = 3, xlab='', main=expression(mu[beta]), ylab='', cex.main=1.5, font.main = 1)
+xlabel <- seq(-30, 30, by = 2)
+axis(1, at = xlabel, las = 1)
+par(new=TRUE)
+plot(xb, rstan_mub, type='l', xlim=c(5, 15), ylim=c(0, 2.5), col="#42e0f5", lwd = 3, xlab='', ylab='', main='')
+par(new=TRUE)
+abline(xlim=c(5, 15), ylim=c(0, 2.5), v=9.39, col=alpha("#42e0f5", 0.5), lwd=2)
+par(new=TRUE)
+abline(xlim=c(5, 15), ylim=c(0, 2.5), v=10.48, col=alpha("green", 0.5), lwd=2)
+
+# SIGMA
+
+sa <- seq(0, 2, length=1000)
+rstan_siga = dnorm(sa, 0.06, 0.05)
+agena_siga = dnorm(sa, 0.02, 0.01)
+
+sb <- seq(0, 2, length=1000)
+rstan_sigb = dnorm(sb, 0.04, 0.03)
+agena_sigb = dnorm(sb, 0.01, 0.01)
+
+plot(sa, agena_siga, type="l", xlim=c(0, 0.4), ylim=c(0, 45), col="green", lwd = 3, xlab='', main=expression(sigma[alpha]), ylab='Probability Density', cex.main=1.5, font.main = 1)
+xlabel <- seq(-2, 2, by = 0.1)
+axis(1, at = xlabel, las = 0.2)
+par(new=TRUE)
+plot(sa, rstan_siga, type='l', xlim=c(0, 0.4), ylim=c(0, 45), col="#42e0f5", lwd = 3, xlab='', ylab='', main='')
+par(new=TRUE)
+abline(xlim=c(0, 0.4), ylim=c(0, 20), v=0.06, col=alpha("#42e0f5", 0.5), lwd=2)
+par(new=TRUE)
+abline(xlim=c(0, 0.4), ylim=c(0, 20), v=0.02, col=alpha("green", 0.5), lwd=2)
+
+plot(sb, agena_sigb, type="l", xlim=c(0, 0.4), ylim=c(0, 45), col="green", lwd = 3, xlab='', main=expression(sigma[beta]), ylab='', cex.main=1.5, font.main = 1)
+xlabel <- seq(-2, 2, by = 0.2)
+axis(1, at = xlabel, las = 0.2)
+par(new=TRUE)
+plot(sb, rstan_sigb, type='l', xlim=c(0, 0.4), ylim=c(0, 45), col="#42e0f5", lwd = 3, xlab='', ylab='', main='')
+par(new=TRUE)
+abline(xlim=c(0, 0.4), ylim=c(0, 20), v=0.04, col=alpha("#42e0f5", 0.5), lwd=2)
+par(new=TRUE)
+abline(xlim=c(0, 0.4), ylim=c(0, 20), v=0.01, col=alpha("green", 0.5), lwd=2)
+```
